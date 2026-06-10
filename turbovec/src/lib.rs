@@ -30,9 +30,11 @@
 //! after `add`/`load` to pay that cost up front.
 //!
 //! Mutation still flows through `&mut self`: `add` extends the packed
-//! codes and invalidates the blocked layout cache by replacing its
-//! `OnceLock`. This keeps the invariant that once a cache is populated
-//! from `&self`, it matches the current `packed_codes`.
+//! codes and updates the blocked layout cache in-place (only the tail
+//! blocks that overlap the newly-added vectors are repacked and appended).
+//! `swap_remove` fully resets the blocked cache because it reorders
+//! vectors non-deterministically. This keeps the invariant that once a
+//! cache is populated from `&self`, it matches the current `packed_codes`.
 
 pub mod codebook;
 pub mod encode;
@@ -40,11 +42,13 @@ pub mod error;
 pub mod id_map;
 pub mod io;
 pub mod pack;
+pub mod refine;
 pub mod rotation;
 pub mod search;
 
-pub use error::{AddError, ConstructError};
+pub use error::{AddError, ConstructError, RerankError};
 pub use id_map::IdMapIndex;
+pub use refine::{RefineMode, RefineStore};
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -85,9 +89,11 @@ fn first_invalid_coord(values: &[f32], dim: usize) -> Option<(usize, usize, f32)
 
 /// SIMD-blocked cache derived from `packed_codes`.
 ///
-/// Materialised lazily by [`TurboQuantIndex::search`] on first call
-/// and re-materialised when [`TurboQuantIndex::add`] resets the
-/// enclosing `OnceLock`.
+/// Materialised lazily by [`TurboQuantIndex::search`] on first call.
+/// After each [`TurboQuantIndex::add`], only the tail blocks (starting
+/// from `old_n_vectors / BLOCK`) are repacked and appended in-place —
+/// the earlier blocks are identical and reused. [`TurboQuantIndex::swap_remove`]
+/// fully resets the cache because vector ordering changes unpredictably.
 struct BlockedCache {
     data: Vec<u8>,
     n_blocks: usize,
@@ -128,8 +134,16 @@ pub struct TurboQuantIndex {
     boundaries: OnceLock<Vec<f32>>,
     centroids: OnceLock<Vec<f32>>,
     blocked: OnceLock<BlockedCache>,
+
+    /// Opt-in refinement store for cascade re-ranking.  `None` when the
+    /// index was constructed without `new_with_refine` / `new_lazy_with_refine`.
+    /// Once set it is never replaced — the caller must commit to a mode before
+    /// the first `add` since original vectors cannot be recovered from the
+    /// quantized representation.
+    refine: Option<refine::RefineStore>,
 }
 
+#[derive(Debug)]
 pub struct SearchResults {
     pub scores: Vec<f32>,
     pub indices: Vec<i64>,
@@ -175,7 +189,34 @@ impl TurboQuantIndex {
             boundaries: OnceLock::new(),
             centroids: OnceLock::new(),
             blocked: OnceLock::new(),
+            refine: None,
         })
+    }
+
+    /// Construct an index with a known dim and an opt-in refinement store for
+    /// cascade re-ranking. See [`Self::search_with_rerank`].
+    ///
+    /// The `mode` must be chosen before the first `add` — original vectors
+    /// cannot be recovered from the quantized representation.
+    pub fn new_with_refine(
+        dim: usize,
+        bit_width: usize,
+        mode: RefineMode,
+    ) -> Result<Self, ConstructError> {
+        let mut s = Self::new(dim, bit_width)?;
+        s.refine = Some(refine::RefineStore::new(mode));
+        Ok(s)
+    }
+
+    /// Construct an empty (lazy-dim) index with a refinement store.
+    /// See [`Self::new_lazy`] and [`Self::new_with_refine`].
+    pub fn new_lazy_with_refine(
+        bit_width: usize,
+        mode: RefineMode,
+    ) -> Result<Self, ConstructError> {
+        let mut s = Self::new_lazy(bit_width)?;
+        s.refine = Some(refine::RefineStore::new(mode));
+        Ok(s)
     }
 
     /// Construct an empty index without committing to a dimensionality.
@@ -200,6 +241,7 @@ impl TurboQuantIndex {
             boundaries: OnceLock::new(),
             centroids: OnceLock::new(),
             blocked: OnceLock::new(),
+            refine: None,
         })
     }
 
@@ -292,13 +334,45 @@ impl TurboQuantIndex {
             self.scales.extend_from_slice(&scales);
             // tqplus_shift/scale unchanged — locked by the first add.
         }
+
+        // Append to the refine store (if present) with the original input
+        // vectors. Must happen after the early `n == 0` return above so an
+        // empty first add stays a true no-op for the refine store too.
+        if let Some(rs) = &mut self.refine {
+            rs.append(vectors, n, dim);
+        }
+
+        let old_n = self.n_vectors;
         self.n_vectors += n;
 
-        // Invalidate the blocked cache — it was derived from the old
-        // `packed_codes` and no longer matches the extended vector set.
-        // Rotation, boundaries, and centroids remain valid (they only depend
-        // on `(dim, ROTATION_SEED)` and `(bit_width, dim)`).
-        self.blocked = OnceLock::new();
+        // Update the blocked cache incrementally: only the blocks that
+        // overlap the newly-added range need repacking.  Blocks before
+        // `first_dirty` are untouched because each block's bytes are a pure
+        // function of exactly the 32 vectors in that block — earlier blocks
+        // could not have changed.  `old_n / BLOCK` handles both the
+        // "block-aligned boundary" and "partial tail block that must be
+        // rewritten" cases correctly.
+        //
+        // If the cache hasn't been materialised yet (no search/prepare since
+        // the last swap_remove or construction), do nothing — the next
+        // search/prepare will build it fully at that point.
+        //
+        // `swap_remove` keeps a full reset (see its comment) because it
+        // reorders vectors non-deterministically.
+        if let Some(cache) = self.blocked.get_mut() {
+            let first_dirty = old_n / BLOCK;
+            let codes_per_byte = 8 / self.bit_width;
+            let n_byte_groups = dim / codes_per_byte;
+            cache.data.truncate(first_dirty * n_byte_groups * BLOCK);
+            cache.data.extend(pack::repack_range(
+                &self.packed_codes,
+                self.n_vectors,
+                self.bit_width,
+                dim,
+                first_dirty,
+            ));
+            cache.n_blocks = (self.n_vectors + BLOCK - 1) / BLOCK;
+        }
     }
 
     /// Add `vectors` of dimension `dim`. On a lazy index this locks the
@@ -482,6 +556,105 @@ impl TurboQuantIndex {
         }
     }
 
+    /// Cascade re-rank: coarse SIMD scan → exact re-score of top candidates.
+    ///
+    /// 1. Runs a coarse `search_with_mask` for `k * rerank_factor` candidates
+    ///    using the quantized codes and SIMD LUT scoring.
+    /// 2. Re-scores each candidate with the stored original vectors from the
+    ///    [`refine::RefineStore`] (int8 or f32).
+    /// 3. Returns the true top-`k` by exact inner-product score.
+    ///
+    /// Returns [`RerankError::NoRefineStore`] if the index was constructed
+    /// without `new_with_refine` / `new_lazy_with_refine`, and
+    /// [`RerankError::InvalidRerankFactor`] if `rerank_factor < 1`.
+    ///
+    /// Mask correctness is inherited from the coarse stage: masked-out slots
+    /// are never returned even after re-ranking.
+    pub fn search_with_rerank(
+        &self,
+        queries: &[f32],
+        k: usize,
+        rerank_factor: usize,
+    ) -> Result<SearchResults, RerankError> {
+        self.search_with_rerank_mask(queries, k, rerank_factor, None)
+    }
+
+    /// Cascade re-rank with mask filtering. See [`Self::search_with_rerank`].
+    pub fn search_with_rerank_mask(
+        &self,
+        queries: &[f32],
+        k: usize,
+        rerank_factor: usize,
+        mask: Option<&[bool]>,
+    ) -> Result<SearchResults, RerankError> {
+        let rs = self.refine.as_ref().ok_or(RerankError::NoRefineStore)?;
+        if rerank_factor < 1 {
+            return Err(RerankError::InvalidRerankFactor(rerank_factor));
+        }
+        let Some(dim) = self.dim else {
+            return Ok(SearchResults {
+                scores: Vec::new(),
+                indices: Vec::new(),
+                nq: 0,
+                k: 0,
+            });
+        };
+
+        let coarse_k = (k * rerank_factor).min(self.n_vectors);
+        let coarse = self.search_with_mask(queries, coarse_k, mask);
+        let nq = coarse.nq;
+        let effective_k = k.min(coarse.k); // coarse.k already ≤ n_allowed
+
+        // Re-score each query's candidates in parallel.
+        use rayon::prelude::*;
+        let query_stride = dim;
+        let (reranked_scores, reranked_indices): (Vec<f32>, Vec<i64>) = (0..nq)
+            .into_par_iter()
+            .flat_map(|qi| {
+                let q = &queries[qi * query_stride..(qi + 1) * query_stride];
+                let cand_slots = coarse.indices_for_query(qi);
+
+                // Re-score candidates with the refinement store.
+                let mut scored: Vec<(f32, i64)> = cand_slots
+                    .iter()
+                    .filter(|&&slot| slot >= 0)
+                    .map(|&slot| {
+                        let exact = rs.score(q, slot as usize, dim);
+                        (exact, slot)
+                    })
+                    .collect();
+
+                // Sort descending by exact score, return top effective_k.
+                scored.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                scored.truncate(effective_k);
+                // Pad to effective_k so the output is row-major with fixed stride.
+                scored
+                    .into_iter()
+                    .chain(std::iter::repeat((-f32::INFINITY, -1i64)))
+                    .take(effective_k)
+                    .collect::<Vec<_>>()
+            })
+            .map(|(s, i)| (s, i))
+            .unzip();
+
+        Ok(SearchResults {
+            scores: reranked_scores,
+            indices: reranked_indices,
+            nq,
+            k: effective_k,
+        })
+    }
+
+    /// True when the index has an opt-in refinement store for re-ranking.
+    pub fn has_refine(&self) -> bool {
+        self.refine.is_some()
+    }
+
+    /// The [`RefineMode`] of the refinement store, or `None` if no store.
+    pub fn refine_mode(&self) -> Option<RefineMode> {
+        self.refine.as_ref().map(|rs| rs.mode)
+    }
+
     /// Eagerly populate the search caches (rotation matrix, centroids
     /// and SIMD-blocked code layout).
     ///
@@ -523,11 +696,12 @@ impl TurboQuantIndex {
             &self.scales,
             &self.tqplus_shift,
             &self.tqplus_scale,
+            self.refine.as_ref(),
         )
     }
 
     pub fn load(path: impl AsRef<Path>) -> std::io::Result<Self> {
-        let (bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale) =
+        let (bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale, refine_store) =
             io::load(path)?;
         let dim_opt = if dim == 0 { None } else { Some(dim) };
         Ok(Self::from_parts(
@@ -538,6 +712,7 @@ impl TurboQuantIndex {
             scales,
             tqplus_shift,
             tqplus_scale,
+            refine_store,
         ))
     }
 
@@ -549,6 +724,7 @@ impl TurboQuantIndex {
         scales: Vec<f32>,
         tqplus_shift: Vec<f32>,
         tqplus_scale: Vec<f32>,
+        refine_store: Option<refine::RefineStore>,
     ) -> Self {
         // Structural invariants every caller must uphold. `from_parts` is
         // pub(crate); today the only callers are `io::load` and
@@ -629,6 +805,33 @@ impl TurboQuantIndex {
         } else {
             (tqplus_shift, tqplus_scale)
         };
+        // Validate refine store length if provided.
+        if let (Some(rs), Some(d)) = (&refine_store, dim) {
+            if n_vectors > 0 {
+                let expected_floats = n_vectors * d;
+                let expected_i8 = n_vectors * d;
+                match rs.mode {
+                    refine::RefineMode::Float32 => assert_eq!(
+                        rs.floats.len(), expected_floats,
+                        "from_parts: refine floats.len()={} != n_vectors({}) * dim({})",
+                        rs.floats.len(), n_vectors, d,
+                    ),
+                    refine::RefineMode::Int8 => {
+                        assert_eq!(
+                            rs.codes_i8.len(), expected_i8,
+                            "from_parts: refine codes_i8.len()={} != n_vectors({}) * dim({})",
+                            rs.codes_i8.len(), n_vectors, d,
+                        );
+                        assert_eq!(
+                            rs.i8_scales.len(), n_vectors,
+                            "from_parts: refine i8_scales.len()={} != n_vectors={}",
+                            rs.i8_scales.len(), n_vectors,
+                        );
+                    }
+                }
+            }
+        }
+
         Self {
             dim,
             bit_width,
@@ -641,6 +844,7 @@ impl TurboQuantIndex {
             boundaries: OnceLock::new(),
             centroids: OnceLock::new(),
             blocked: OnceLock::new(),
+            refine: refine_store,
         }
     }
 
@@ -697,6 +901,12 @@ impl TurboQuantIndex {
         // Truncate both arrays.
         self.packed_codes.truncate(last * bytes_per_vec);
         self.scales.truncate(last);
+
+        // Mirror the swap_remove on the refine store before decrementing n_vectors.
+        if let Some(rs) = &mut self.refine {
+            rs.swap_remove(idx, self.n_vectors, dim);
+        }
+
         self.n_vectors -= 1;
 
         // Invalidate the blocked cache since it was derived from the old layout.
@@ -731,6 +941,21 @@ impl TurboQuantIndex {
     pub fn bit_width(&self) -> usize {
         self.bit_width
     }
+
+    pub(crate) fn refine_store(&self) -> Option<&refine::RefineStore> {
+        self.refine.as_ref()
+    }
+
+    /// Return the raw bytes of the SIMD-blocked layout cache, or `None` if
+    /// the cache has not been materialised yet (no `search`/`prepare` since
+    /// the last `swap_remove` or construction).
+    ///
+    /// Used by integration tests to verify byte-identity between incremental
+    /// and full-repack paths.
+    #[doc(hidden)]
+    pub fn blocked_data_for_tests(&self) -> Option<&[u8]> {
+        self.blocked.get().map(|c| c.data.as_slice())
+    }
 }
 
 #[cfg(test)]
@@ -756,6 +981,7 @@ mod from_parts_tests {
             vec![1.0f32; 2],
             Vec::new(),
             Vec::new(),
+            None,
         );
     }
 
@@ -770,6 +996,7 @@ mod from_parts_tests {
             vec![1.0f32; 5],  // n_vectors says 2; scales has 5
             Vec::new(),
             Vec::new(),
+            None,
         );
     }
 
@@ -784,6 +1011,7 @@ mod from_parts_tests {
             vec![1.0f32; 2],
             vec![0.0f32; 64],   // length 64
             vec![1.0f32; 32],   // length 32 — mismatch
+            None,
         );
     }
 
@@ -798,6 +1026,7 @@ mod from_parts_tests {
             vec![1.0f32; 2],
             vec![0.0f32; 48],   // length 48 != dim 64
             vec![1.0f32; 48],
+            None,
         );
     }
 
@@ -812,6 +1041,7 @@ mod from_parts_tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            None,
         );
     }
 
@@ -827,6 +1057,7 @@ mod from_parts_tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            None,
         );
         assert_eq!(idx.dim_opt(), None);
         assert_eq!(idx.len(), 0);
@@ -845,6 +1076,7 @@ mod from_parts_tests {
             vec![1.0f32; 2],
             Vec::new(),
             Vec::new(),
+            None,
         );
         assert_eq!(idx.dim(), 64);
         assert_eq!(idx.len(), 2);

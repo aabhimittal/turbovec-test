@@ -39,7 +39,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::io;
-use crate::{AddError, ConstructError, TurboQuantIndex};
+use crate::refine::RefineMode;
+use crate::{AddError, ConstructError, RerankError, TurboQuantIndex};
 
 /// ID-addressed wrapper around [`TurboQuantIndex`].
 pub struct IdMapIndex {
@@ -69,6 +70,32 @@ impl IdMapIndex {
     pub fn new_lazy(bit_width: usize) -> Result<Self, ConstructError> {
         Ok(Self {
             inner: TurboQuantIndex::new_lazy(bit_width)?,
+            slot_to_id: Vec::new(),
+            id_to_slot: HashMap::new(),
+        })
+    }
+
+    /// Construct an id-map index with a refinement store. See
+    /// [`TurboQuantIndex::new_with_refine`].
+    pub fn new_with_refine(
+        dim: usize,
+        bit_width: usize,
+        mode: RefineMode,
+    ) -> Result<Self, ConstructError> {
+        Ok(Self {
+            inner: TurboQuantIndex::new_with_refine(dim, bit_width, mode)?,
+            slot_to_id: Vec::new(),
+            id_to_slot: HashMap::new(),
+        })
+    }
+
+    /// Construct a lazy id-map index with a refinement store.
+    pub fn new_lazy_with_refine(
+        bit_width: usize,
+        mode: RefineMode,
+    ) -> Result<Self, ConstructError> {
+        Ok(Self {
+            inner: TurboQuantIndex::new_lazy_with_refine(bit_width, mode)?,
             slot_to_id: Vec::new(),
             id_to_slot: HashMap::new(),
         })
@@ -236,6 +263,23 @@ impl IdMapIndex {
         (res.scores, ids)
     }
 
+    /// Cascade re-rank: coarse SIMD scan → exact re-score of top candidates.
+    /// See [`TurboQuantIndex::search_with_rerank`].
+    ///
+    /// Returns `(scores, ids)` where `ids` are external u64 IDs (not slots).
+    pub fn search_with_rerank(
+        &self,
+        queries: &[f32],
+        k: usize,
+        rerank_factor: usize,
+    ) -> Result<(Vec<f32>, Vec<u64>), RerankError> {
+        let res = self.inner.search_with_rerank(queries, k, rerank_factor)?;
+        let ids = res.indices.iter().map(|&slot| {
+            if slot < 0 { 0u64 } else { self.slot_to_id[slot as usize] }
+        }).collect();
+        Ok((res.scores, ids))
+    }
+
     /// True if the index currently contains a vector with this id.
     pub fn contains(&self, id: u64) -> bool {
         self.id_to_slot.contains_key(&id)
@@ -285,16 +329,18 @@ impl IdMapIndex {
             self.inner.tqplus_shift(),
             self.inner.tqplus_scale(),
             &self.slot_to_id,
+            self.inner.refine_store(),
         )
     }
 
     /// Load a `.tvim` file previously written by [`Self::write`].
     pub fn load(path: impl AsRef<Path>) -> std::io::Result<Self> {
-        let (bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale, slot_to_id) =
+        let (bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale, slot_to_id, refine_store) =
             io::load_id_map(path)?;
         let dim_opt = if dim == 0 { None } else { Some(dim) };
         let inner = TurboQuantIndex::from_parts(
             dim_opt, bit_width, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale,
+            refine_store,
         );
         let id_to_slot: HashMap<u64, usize> = slot_to_id
             .iter()
