@@ -30,9 +30,31 @@ Building RAG where privacy, memory, or latency matters? **You're in the right pl
 >
 > Each technique is explained from first principles — no prior knowledge of machine learning or systems programming is assumed.
 
+**[Full setup guide →](docs/SETUP.md)** — local, Docker, Claude Code on the web, Pinecone/Qdrant real-data swap-in.
+
 Run the demo yourself:
 ```bash
-python3 demo/run_demo.py
+# Quick smoke-test (uses 500-vector sample committed to repo — no generation needed)
+python3 demo/run_demo.py --sample
+
+# Full 100K benchmark + charts
+python3 demo/generate_dataset.py   # generates demo/data/corpus_100k.npz (~545 MB)
+python3 demo/run_demo.py --charts  # runs benchmark, saves demo/charts/*.png
+```
+
+### Demo results — charts
+
+| Memory footprint | Recall@k curves |
+|---|---|
+| ![Memory comparison](demo/charts/memory_comparison.png) | ![Recall@k](demo/charts/recall_at_k.png) |
+
+| Recall gain by rerank factor | Incremental add: O(batch) vs O(n) |
+|---|---|
+| ![Rerank improvement](demo/charts/rerank_improvement.png) | ![Incremental add](demo/charts/incremental_add.png) |
+
+| Memory at scale (100K → 1B) | Memory vs Recall tradeoff |
+|---|---|
+| ![Scale projection](demo/charts/scale_projection.png) | ![Bit-width tradeoff](demo/charts/bitwidth_tradeoff.png) |
 ```
 
 ### Test suite — 163 / 163 passing
