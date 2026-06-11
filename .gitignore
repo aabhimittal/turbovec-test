@@ -11,3 +11,4 @@ codebooks.npz
 target/
 evolve/
 evolve_rust/
+demo/data/corpus_100k.npz
