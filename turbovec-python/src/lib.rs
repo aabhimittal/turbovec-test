@@ -8,6 +8,17 @@ fn not_contiguous_err(kind: &str) -> PyErr {
     ))
 }
 
+fn parse_refine_mode(s: Option<&str>) -> PyResult<Option<turbovec_core::RefineMode>> {
+    match s {
+        None => Ok(None),
+        Some("int8")    => Ok(Some(turbovec_core::RefineMode::Int8)),
+        Some("float32") => Ok(Some(turbovec_core::RefineMode::Float32)),
+        Some(other) => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "refine must be None, \"int8\", or \"float32\"; got {:?}", other
+        ))),
+    }
+}
+
 #[pyclass]
 struct TurboQuantIndex {
     inner: turbovec_core::TurboQuantIndex,
@@ -20,11 +31,14 @@ impl TurboQuantIndex {
     /// `add` call, picking up the dimensionality from the input
     /// array's shape.
     #[new]
-    #[pyo3(signature = (dim=None, bit_width=4))]
-    fn new(dim: Option<usize>, bit_width: usize) -> PyResult<Self> {
-        let inner = match dim {
-            Some(d) => turbovec_core::TurboQuantIndex::new(d, bit_width),
-            None => turbovec_core::TurboQuantIndex::new_lazy(bit_width),
+    #[pyo3(signature = (dim=None, bit_width=4, refine=None))]
+    fn new(dim: Option<usize>, bit_width: usize, refine: Option<&str>) -> PyResult<Self> {
+        let mode = parse_refine_mode(refine)?;
+        let inner = match (dim, mode) {
+            (Some(d), Some(m)) => turbovec_core::TurboQuantIndex::new_with_refine(d, bit_width, m),
+            (Some(d), None)    => turbovec_core::TurboQuantIndex::new(d, bit_width),
+            (None,    Some(m)) => turbovec_core::TurboQuantIndex::new_lazy_with_refine(bit_width, m),
+            (None,    None)    => turbovec_core::TurboQuantIndex::new_lazy(bit_width),
         }
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(Self { inner })
@@ -46,21 +60,18 @@ impl TurboQuantIndex {
     /// `mask`, when given, is a bool array of length `len(self)`. Only slots
     /// with `mask[i] == True` contribute to the returned top-`k`. The
     /// returned result count per query is `min(k, mask.sum())`.
-    #[pyo3(signature = (queries, k, *, mask=None))]
+    #[pyo3(signature = (queries, k, *, mask=None, rerank_factor=None))]
     fn search<'py>(
         &self,
         py: Python<'py>,
         queries: PyReadonlyArray2<f32>,
         k: usize,
         mask: Option<PyReadonlyArray1<bool>>,
+        rerank_factor: Option<usize>,
     ) -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<i64>>)> {
         let arr = queries.as_array();
         let nq = arr.nrows();
         let q_slice = arr.as_slice().ok_or_else(|| not_contiguous_err("queries"))?;
-        // Reject wrong-dim queries cleanly. Previously the inner
-        // `assert_eq!(queries.len(), nq * dim)` would fire as a Rust
-        // panic and surface to Python as a PanicException, not the
-        // ValueError users expect for input-shape mismatch.
         if let Some(idx_dim) = self.inner.dim_opt() {
             if arr.ncols() != idx_dim {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -87,13 +98,22 @@ impl TurboQuantIndex {
             None => None,
         };
 
-        let results = self.inner.search_with_mask(q_slice, k, mask_slice);
-        let effective_k = results.k;
+        let (scores_vec, indices_vec, effective_k) = if let Some(rf) = rerank_factor {
+            let results = self.inner
+                .search_with_rerank_mask(q_slice, k, rf, mask_slice)
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+            let ek = results.k;
+            (results.scores, results.indices, ek)
+        } else {
+            let results = self.inner.search_with_mask(q_slice, k, mask_slice);
+            let ek = results.k;
+            (results.scores, results.indices, ek)
+        };
 
-        let scores = numpy::ndarray::Array2::from_shape_vec((nq, effective_k), results.scores)
+        let scores = numpy::ndarray::Array2::from_shape_vec((nq, effective_k), scores_vec)
             .unwrap()
             .into_pyarray(py);
-        let indices = numpy::ndarray::Array2::from_shape_vec((nq, effective_k), results.indices)
+        let indices = numpy::ndarray::Array2::from_shape_vec((nq, effective_k), indices_vec)
             .unwrap()
             .into_pyarray(py);
 
@@ -180,11 +200,14 @@ impl IdMapIndex {
     /// the underlying quantized index is created lazily on the first
     /// `add_with_ids` call, picking up dim from the input array shape.
     #[new]
-    #[pyo3(signature = (dim=None, bit_width=4))]
-    fn new(dim: Option<usize>, bit_width: usize) -> PyResult<Self> {
-        let inner = match dim {
-            Some(d) => turbovec_core::IdMapIndex::new(d, bit_width),
-            None => turbovec_core::IdMapIndex::new_lazy(bit_width),
+    #[pyo3(signature = (dim=None, bit_width=4, refine=None))]
+    fn new(dim: Option<usize>, bit_width: usize, refine: Option<&str>) -> PyResult<Self> {
+        let mode = parse_refine_mode(refine)?;
+        let inner = match (dim, mode) {
+            (Some(d), Some(m)) => turbovec_core::IdMapIndex::new_with_refine(d, bit_width, m),
+            (Some(d), None)    => turbovec_core::IdMapIndex::new(d, bit_width),
+            (None,    Some(m)) => turbovec_core::IdMapIndex::new_lazy_with_refine(bit_width, m),
+            (None,    None)    => turbovec_core::IdMapIndex::new_lazy(bit_width),
         }
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(Self { inner })
