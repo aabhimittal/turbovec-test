@@ -3,33 +3,36 @@
 //! Two formats live here:
 //! * `.tv` — [`TurboQuantIndex`](crate::TurboQuantIndex) — 4-byte magic
 //!   "TVPI" + version + bit_width/dim/n_vectors header + packed codes +
-//!   per-vector scales + (v3+) TQ+ per-coord calibration.
+//!   per-vector scales + (v3+) TQ+ per-coord calibration + (v4+) refine store.
 //! * `.tvim` — [`IdMapIndex`](crate::IdMapIndex) — 4-byte magic "TVIM"
 //!   + version + the same core-index payload + a trailing `slot_to_id`
 //!   table of `u64` values.
 //!
 //! ## Format versioning
 //!
-//! Both formats are at version 3 as of turbovec 0.6.x (TQ+ per-coord
-//! calibration). Version 2 (turbovec 0.4.4 .. 0.6.0) is loaded transparently
-//! with empty calibration — the index behaves like the old encoding, with
-//! no recall change and no TQ+ gain. Re-encoding from source vectors picks
-//! up the new calibration. Version 1 (turbovec ≤ 0.4.3) is incompatible
-//! and refused with a rebuild hint.
+//! | Version | Turbovec | Changes |
+//! |---------|----------|---------|
+//! | v1 | ≤ 0.4.3 | No magic; refused with rebuild hint |
+//! | v2 | 0.4.4–0.5.x | Magic + version; no TQ+; loads as identity calibration |
+//! | v3 | 0.6.x+ | Adds TQ+ calibration trailer |
+//! | v4 | 0.9+ | Adds optional refine store trailer; only written when present |
 //!
-//! Version 1 `.tv` files had no magic — the file started with a bare
-//! bit_width byte (2/3/4). Version 2+ prepends magic + version, which
-//! lets us detect either a current file or "looks like a v1 turbovec
-//! file" cleanly.
+//! A v4 file is written only when the index was constructed with a
+//! `RefineStore`. Default (no refine) indexes continue to write v3 so old
+//! readers are unaffected.
 
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
+use crate::refine::{RefineMode, RefineStore};
+
 const TV_MAGIC: &[u8; 4] = b"TVPI";
-const TV_VERSION: u8 = 3;
+const TV_VERSION_DEFAULT: u8 = 3;
+const TV_VERSION_WITH_REFINE: u8 = 4;
 const TVIM_MAGIC: &[u8; 4] = b"TVIM";
-const TVIM_VERSION: u8 = 3;
+const TVIM_VERSION_DEFAULT: u8 = 3;
+const TVIM_VERSION_WITH_REFINE: u8 = 4;
 
 const REBUILD_HINT: &str =
     "Rebuild this index from the source vectors using turbovec 0.4.4 or later \
@@ -37,7 +40,8 @@ const REBUILD_HINT: &str =
      of the per-vector scalar from ||v|| to a length-renormalization correction).";
 
 /// Core payload — what a fully-deserialized index needs.
-type CoreLoad = (usize, usize, usize, Vec<u8>, Vec<f32>, Vec<f32>, Vec<f32>);
+/// Tuple: (bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale, refine_store)
+type CoreLoad = (usize, usize, usize, Vec<u8>, Vec<f32>, Vec<f32>, Vec<f32>, Option<RefineStore>);
 
 /// `.tv` write — positional index.
 pub fn write(
@@ -49,31 +53,31 @@ pub fn write(
     scales: &[f32],
     tqplus_shift: &[f32],
     tqplus_scale: &[f32],
+    refine: Option<&RefineStore>,
 ) -> io::Result<()> {
+    let version = if refine.is_some() { TV_VERSION_WITH_REFINE } else { TV_VERSION_DEFAULT };
     let mut f = BufWriter::new(File::create(path)?);
     f.write_all(TV_MAGIC)?;
-    f.write_all(&[TV_VERSION])?;
+    f.write_all(&[version])?;
     write_core(
         &mut f, bit_width, dim, n_vectors, packed_codes, scales,
         tqplus_shift, tqplus_scale,
     )?;
+    if let Some(rs) = refine {
+        write_refine_trailer(&mut f, rs, n_vectors, dim)?;
+    }
     f.flush()?;
     Ok(())
 }
 
-/// `.tv` load — positional index. Transparently handles v2 (no TQ+) and
-/// v3 (with TQ+) files; v2 returns empty TQ+ vectors which the engine
-/// treats as identity calibration.
+/// `.tv` load — positional index. Transparently handles v2 (no TQ+),
+/// v3 (with TQ+), and v4 (with refine store).
 pub fn load(path: impl AsRef<Path>) -> io::Result<CoreLoad> {
     let mut f = BufReader::new(File::open(path)?);
 
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
     if &magic != TV_MAGIC {
-        // Version 1 .tv files had no magic — first byte was the bit_width
-        // (always 2, 3, or 4). If we see one of those as the first byte,
-        // emit a targeted error rather than the generic "wrong magic"
-        // message; otherwise treat it as a non-turbovec file.
         if (2..=4).contains(&magic[0]) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -92,7 +96,7 @@ pub fn load(path: impl AsRef<Path>) -> io::Result<CoreLoad> {
     }
     let mut version = [0u8; 1];
     f.read_exact(&mut version)?;
-    read_core_versioned(&mut f, version[0], TV_VERSION, ".tv")
+    read_core_versioned(&mut f, version[0], TV_VERSION_WITH_REFINE, ".tv")
 }
 
 /// `.tvim` write — positional index plus the id-map side-tables.
@@ -106,6 +110,7 @@ pub fn write_id_map(
     tqplus_shift: &[f32],
     tqplus_scale: &[f32],
     slot_to_id: &[u64],
+    refine: Option<&RefineStore>,
 ) -> io::Result<()> {
     assert_eq!(
         slot_to_id.len(),
@@ -115,9 +120,10 @@ pub fn write_id_map(
         n_vectors,
     );
 
+    let version = if refine.is_some() { TVIM_VERSION_WITH_REFINE } else { TVIM_VERSION_DEFAULT };
     let mut f = BufWriter::new(File::create(path)?);
     f.write_all(TVIM_MAGIC)?;
-    f.write_all(&[TVIM_VERSION])?;
+    f.write_all(&[version])?;
     write_core(
         &mut f, bit_width, dim, n_vectors, packed_codes, scales,
         tqplus_shift, tqplus_scale,
@@ -126,6 +132,9 @@ pub fn write_id_map(
     for &id in slot_to_id {
         f.write_all(&id.to_le_bytes())?;
     }
+    if let Some(rs) = refine {
+        write_refine_trailer(&mut f, rs, n_vectors, dim)?;
+    }
     f.flush()?;
     Ok(())
 }
@@ -133,7 +142,7 @@ pub fn write_id_map(
 /// `.tvim` load — positional index plus the id-map side-tables.
 pub fn load_id_map(
     path: impl AsRef<Path>,
-) -> io::Result<(usize, usize, usize, Vec<u8>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<u64>)> {
+) -> io::Result<(usize, usize, usize, Vec<u8>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<u64>, Option<RefineStore>)> {
     let mut f = BufReader::new(File::open(path)?);
 
     let mut magic = [0u8; 4];
@@ -157,8 +166,8 @@ pub fn load_id_map(
             ),
         ));
     }
-    let (bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale) =
-        read_core_versioned(&mut f, version[0], TVIM_VERSION, ".tvim")?;
+    let (bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale, refine_store) =
+        read_core_versioned(&mut f, version[0], TVIM_VERSION_WITH_REFINE, ".tvim")?;
 
     let mut slot_to_id = Vec::with_capacity(n_vectors);
     let mut buf = [0u8; 8];
@@ -167,9 +176,16 @@ pub fn load_id_map(
         slot_to_id.push(u64::from_le_bytes(buf));
     }
 
+    // v4: refine trailer follows slot_to_id.
+    let refine_store = if version[0] == 4 {
+        Some(read_refine_trailer(&mut f, n_vectors, dim)?)
+    } else {
+        refine_store // None from versioned dispatch
+    };
+
     Ok((
         bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale,
-        slot_to_id,
+        slot_to_id, refine_store,
     ))
 }
 
@@ -213,8 +229,81 @@ fn write_core<W: Write>(
     Ok(())
 }
 
+/// Write the v4 refine trailer.
+///
+/// Layout: `u8 mode (1=Int8, 2=Float32)` followed by:
+/// - Int8: `n` f32 scales, then `n * dim` i8 codes.
+/// - Float32: `n * dim` f32 values.
+fn write_refine_trailer<W: Write>(
+    w: &mut W,
+    rs: &RefineStore,
+    n_vectors: usize,
+    dim: usize,
+) -> io::Result<()> {
+    match rs.mode {
+        RefineMode::Int8 => {
+            w.write_all(&[1u8])?;
+            assert_eq!(rs.i8_scales.len(), n_vectors);
+            assert_eq!(rs.codes_i8.len(), n_vectors * dim);
+            for &s in &rs.i8_scales {
+                w.write_all(&s.to_le_bytes())?;
+            }
+            for &c in &rs.codes_i8 {
+                w.write_all(&[c as u8])?;
+            }
+        }
+        RefineMode::Float32 => {
+            w.write_all(&[2u8])?;
+            assert_eq!(rs.floats.len(), n_vectors * dim);
+            for &v in &rs.floats {
+                w.write_all(&v.to_le_bytes())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read the v4 refine trailer.
+fn read_refine_trailer<R: Read>(
+    r: &mut R,
+    n_vectors: usize,
+    dim: usize,
+) -> io::Result<RefineStore> {
+    let mut mode_byte = [0u8; 1];
+    r.read_exact(&mut mode_byte)?;
+    match mode_byte[0] {
+        1 => {
+            let i8_scales = read_f32_array(r, n_vectors)?;
+            let n_codes = n_vectors * dim;
+            let mut bytes = vec![0u8; n_codes];
+            r.read_exact(&mut bytes)?;
+            let codes_i8: Vec<i8> = bytes.into_iter().map(|b| b as i8).collect();
+            Ok(RefineStore {
+                mode: RefineMode::Int8,
+                codes_i8,
+                i8_scales,
+                floats: Vec::new(),
+            })
+        }
+        2 => {
+            let floats = read_f32_array(r, n_vectors * dim)?;
+            Ok(RefineStore {
+                mode: RefineMode::Float32,
+                codes_i8: Vec::new(),
+                i8_scales: Vec::new(),
+                floats,
+            })
+        }
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unknown refine mode byte {other} in v4 file (expected 1=Int8 or 2=Float32)"),
+        )),
+    }
+}
+
 /// Read the core payload, dispatching on the version byte. Knows about
-/// v2 (no TQ+) and v3 (with TQ+); anything else errors.
+/// v2 (no TQ+) and v3 (with TQ+); v4 deferred to caller for `.tvim`
+/// (which must read slot_to_id between core and refine trailer).
 fn read_core_versioned<R: Read>(
     r: &mut R,
     version: u8,
@@ -224,11 +313,12 @@ fn read_core_versioned<R: Read>(
     match version {
         2 => read_core_v2(r),
         3 => read_core_v3(r),
+        4 => read_core_v4(r),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
                 "unsupported {label} format version: {version} (this build \
-                 supports versions 2 and {expected})",
+                 supports versions 2, 3, and {expected})",
             ),
         )),
     }
@@ -237,7 +327,7 @@ fn read_core_versioned<R: Read>(
 /// v2: header + codes + scales. Returns empty TQ+ vectors (identity calibration).
 fn read_core_v2<R: Read>(r: &mut R) -> io::Result<CoreLoad> {
     let (bit_width, dim, n_vectors, packed_codes, scales) = read_header_codes_scales(r)?;
-    Ok((bit_width, dim, n_vectors, packed_codes, scales, Vec::new(), Vec::new()))
+    Ok((bit_width, dim, n_vectors, packed_codes, scales, Vec::new(), Vec::new(), None))
 }
 
 /// v3: header + codes + scales + TQ+ trailer.
@@ -256,7 +346,33 @@ fn read_core_v3<R: Read>(r: &mut R) -> io::Result<CoreLoad> {
     let tqplus_shift = read_f32_array(r, n_calib)?;
     let tqplus_scale = read_f32_array(r, n_calib)?;
 
-    Ok((bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale))
+    Ok((bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale, None))
+}
+
+/// v4: same as v3 core, then refine trailer.
+/// For `.tv`: refine trailer immediately follows TQ+ data.
+/// For `.tvim`: caller reads slot_to_id between TQ+ and refine; this function
+/// returns `None` for refine and the caller handles v4 detection separately.
+fn read_core_v4<R: Read>(r: &mut R) -> io::Result<CoreLoad> {
+    let (bit_width, dim, n_vectors, packed_codes, scales) = read_header_codes_scales(r)?;
+
+    let mut n_calib_bytes = [0u8; 4];
+    r.read_exact(&mut n_calib_bytes)?;
+    let n_calib = u32::from_le_bytes(n_calib_bytes) as usize;
+    if n_calib != 0 && n_calib != dim {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid TQ+ n_calib {n_calib}: must be 0 or equal to dim {dim}"),
+        ));
+    }
+    let tqplus_shift = read_f32_array(r, n_calib)?;
+    let tqplus_scale = read_f32_array(r, n_calib)?;
+
+    // For .tv files, read the refine trailer right after TQ+ data.
+    // For .tvim, the caller handles this because slot_to_id comes first.
+    let refine_store = read_refine_trailer(r, n_vectors, dim)?;
+
+    Ok((bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale, Some(refine_store)))
 }
 
 fn read_header_codes_scales<R: Read>(

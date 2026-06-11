@@ -88,7 +88,7 @@ fn empty_first_add_does_not_freeze_identity_calibration() {
         std::process::id()
     ));
     idx.write(&tmp).unwrap();
-    let (_, _, _, _, _, shift, scale_tq) = io::load(&tmp).unwrap();
+    let (_, _, _, _, _, shift, scale_tq, _) = io::load(&tmp).unwrap();
     let _ = std::fs::remove_file(&tmp);
 
     assert_eq!(shift.len(), dim);
@@ -157,7 +157,7 @@ fn v2_loaded_index_populates_identity_calibration() {
         std::process::id()
     ));
     idx.write(&tmp).unwrap();
-    let (_, _, _, _, _, shift, scale_tq) = io::load(&tmp).unwrap();
+    let (_, _, _, _, _, shift, scale_tq, _) = io::load(&tmp).unwrap();
     let _ = std::fs::remove_file(&tmp);
 
     assert_eq!(shift.len(), dim as usize);

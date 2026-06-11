@@ -112,3 +112,34 @@ impl fmt::Display for ConstructError {
 }
 
 impl Error for ConstructError {}
+
+/// Error returned by
+/// [`TurboQuantIndex::search_with_rerank`](crate::TurboQuantIndex::search_with_rerank)
+/// and the corresponding `IdMapIndex` method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RerankError {
+    /// The index was constructed without a refinement store. Use
+    /// `TurboQuantIndex::new_with_refine` (or `new_lazy_with_refine`) to
+    /// enable re-ranking.
+    NoRefineStore,
+
+    /// `rerank_factor` must be ≥ 1.
+    InvalidRerankFactor(usize),
+}
+
+impl fmt::Display for RerankError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoRefineStore => write!(
+                f,
+                "index has no refinement store; construct with \
+                 TurboQuantIndex::new_with_refine(dim, bit_width, mode) to enable re-ranking",
+            ),
+            Self::InvalidRerankFactor(n) => {
+                write!(f, "rerank_factor must be >= 1, got {n}")
+            }
+        }
+    }
+}
+
+impl Error for RerankError {}
