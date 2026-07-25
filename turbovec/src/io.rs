@@ -26,6 +26,7 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 use crate::refine::{RefineMode, RefineStore};
+use half::f16;
 
 const TV_MAGIC: &[u8; 4] = b"TVPI";
 const TV_VERSION_DEFAULT: u8 = 3;
@@ -231,9 +232,10 @@ fn write_core<W: Write>(
 
 /// Write the v4 refine trailer.
 ///
-/// Layout: `u8 mode (1=Int8, 2=Float32)` followed by:
+/// Layout: `u8 mode (1=Int8, 2=Float32, 3=Float16)` followed by:
 /// - Int8: `n` f32 scales, then `n * dim` i8 codes.
-/// - Float32: `n * dim` f32 values.
+/// - Float32: `n * dim` f32 values (4 bytes each, LE).
+/// - Float16: `n * dim` f16 values (2 bytes each, LE).
 fn write_refine_trailer<W: Write>(
     w: &mut W,
     rs: &RefineStore,
@@ -256,6 +258,13 @@ fn write_refine_trailer<W: Write>(
             w.write_all(&[2u8])?;
             assert_eq!(rs.floats.len(), n_vectors * dim);
             for &v in &rs.floats {
+                w.write_all(&v.to_le_bytes())?;
+            }
+        }
+        RefineMode::Float16 => {
+            w.write_all(&[3u8])?;
+            assert_eq!(rs.halfs.len(), n_vectors * dim);
+            for &v in &rs.halfs {
                 w.write_all(&v.to_le_bytes())?;
             }
         }
@@ -282,6 +291,7 @@ fn read_refine_trailer<R: Read>(
                 mode: RefineMode::Int8,
                 codes_i8,
                 i8_scales,
+                halfs: Vec::new(),
                 floats: Vec::new(),
             })
         }
@@ -291,12 +301,26 @@ fn read_refine_trailer<R: Read>(
                 mode: RefineMode::Float32,
                 codes_i8: Vec::new(),
                 i8_scales: Vec::new(),
+                halfs: Vec::new(),
                 floats,
+            })
+        }
+        3 => {
+            let halfs = read_f16_array(r, n_vectors * dim)?;
+            Ok(RefineStore {
+                mode: RefineMode::Float16,
+                codes_i8: Vec::new(),
+                i8_scales: Vec::new(),
+                halfs,
+                floats: Vec::new(),
             })
         }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("unknown refine mode byte {other} in v4 file (expected 1=Int8 or 2=Float32)"),
+            format!(
+                "unknown refine mode byte {other} in v4 file \
+                 (expected 1=Int8, 2=Float32, or 3=Float16)"
+            ),
         )),
     }
 }
@@ -398,5 +422,14 @@ fn read_f32_array<R: Read>(r: &mut R, n: usize) -> io::Result<Vec<f32>> {
     Ok(bytes
         .chunks_exact(4)
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect())
+}
+
+fn read_f16_array<R: Read>(r: &mut R, n: usize) -> io::Result<Vec<f16>> {
+    let mut bytes = vec![0u8; n * 2];
+    r.read_exact(&mut bytes)?;
+    Ok(bytes
+        .chunks_exact(2)
+        .map(|b| f16::from_le_bytes([b[0], b[1]]))
         .collect())
 }

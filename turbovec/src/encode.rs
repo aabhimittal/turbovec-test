@@ -29,7 +29,7 @@
 use std::cmp::Ordering;
 
 use ndarray::ArrayView2;
-use rayon::prelude::*;
+use crate::par::prelude::*;
 use statrs::distribution::{Beta, ContinuousCDF};
 
 /// Quantile pair used to fit per-coord `(shift, scale)`.

@@ -138,6 +138,60 @@ fn int8_rerank_monotone_recall() {
     );
 }
 
+// ─── Float16 near-exact recovery + score fidelity ─────────────────────────────
+
+#[test]
+fn float16_rerank_recovers_topk() {
+    // Float16 refine with k' = n should recover the brute-force exact top-k:
+    // half precision loses almost nothing on unit-scaled embeddings.
+    let n = 200;
+    let dim = 64;
+    let k = 5;
+
+    let vecs = unit_vectors(n, dim, 0xF101);
+    let query = unit_vectors(1, dim, 0xF102);
+
+    let mut idx = TurboQuantIndex::new_with_refine(dim, 4, RefineMode::Float16).unwrap();
+    idx.add(&vecs);
+    assert_eq!(idx.refine_mode(), Some(RefineMode::Float16));
+
+    let res = idx.search_with_rerank(&query, k, n / k + 1).unwrap();
+
+    let expected = brute_force_topk(&vecs, &query, k);
+    let mut got: Vec<usize> = res.indices.iter().map(|&i| i as usize).collect();
+    let mut exp = expected.clone();
+    got.sort_unstable();
+    exp.sort_unstable();
+    assert_eq!(got, exp, "Float16 rerank must recover exact top-k on unit vectors");
+}
+
+#[test]
+fn float16_scores_close_to_exact() {
+    // The fp16 re-ranked score must track the exact f32 inner product to
+    // within a tight tolerance — far closer than int8 could.
+    let n = 300;
+    let dim = 128;
+    let k = 20;
+
+    let vecs = unit_vectors(n, dim, 0xF103);
+    let query = unit_vectors(1, dim, 0xF104);
+    let q = &query[..dim];
+
+    let mut f16idx = TurboQuantIndex::new_with_refine(dim, 4, RefineMode::Float16).unwrap();
+    f16idx.add(&vecs);
+
+    let f16res = f16idx.search_with_rerank(q, k, 8).unwrap();
+    let mut max_err = 0.0f32;
+    for (rank, &slot) in f16res.indices.iter().enumerate() {
+        if slot < 0 { continue; }
+        let s = slot as usize;
+        let v = &vecs[s * dim..(s + 1) * dim];
+        let exact: f32 = v.iter().zip(q).map(|(a, b)| a * b).sum();
+        max_err = max_err.max((f16res.scores[rank] - exact).abs());
+    }
+    assert!(max_err < 1e-2, "fp16 score error {max_err} too large vs exact f32 dot");
+}
+
 // ─── rerank_factor = 1 returns coarse index set ───────────────────────────────
 
 #[test]
@@ -317,6 +371,42 @@ fn v4_round_trip_int8() {
     orig_idx.sort_unstable();
     loaded_idx.sort_unstable();
     assert_eq!(orig_idx, loaded_idx, "v4 int8 round-trip must preserve rerank results");
+}
+
+#[test]
+fn v4_round_trip_float16() {
+    let dim = 64;
+    let n = 50;
+    let vecs = unit_vectors(n, dim, 0xF016);
+    let query = unit_vectors(1, dim, 0xF017);
+
+    let mut idx = TurboQuantIndex::new_with_refine(dim, 4, RefineMode::Float16).unwrap();
+    idx.add(&vecs);
+
+    let tmp = std::env::temp_dir().join(format!(
+        "turbovec_rerank_v4_f16_{}.tv",
+        std::process::id()
+    ));
+    idx.write(&tmp).unwrap();
+    assert_eq!(std::fs::read(&tmp).unwrap()[4], 4, "version byte should be 4");
+
+    let loaded = TurboQuantIndex::load(&tmp).unwrap();
+    std::fs::remove_file(&tmp).ok();
+
+    assert!(loaded.has_refine());
+    assert_eq!(loaded.refine_mode(), Some(RefineMode::Float16));
+
+    let orig_res = idx.search_with_rerank(&query, 5, 3).unwrap();
+    let loaded_res = loaded.search_with_rerank(&query, 5, 3).unwrap();
+
+    // f16 stored bytes are identical across write/load, so scores match exactly.
+    assert_eq!(orig_res.scores, loaded_res.scores, "f16 scores must survive round-trip bit-exact");
+
+    let mut orig_idx: Vec<i64> = orig_res.indices.clone();
+    let mut loaded_idx: Vec<i64> = loaded_res.indices.clone();
+    orig_idx.sort_unstable();
+    loaded_idx.sort_unstable();
+    assert_eq!(orig_idx, loaded_idx, "v4 f16 round-trip must preserve rerank results");
 }
 
 #[test]

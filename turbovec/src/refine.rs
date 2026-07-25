@@ -22,23 +22,33 @@
 //!
 //! # Memory cost (d=1536)
 //!
-//! | Mode | Extra bytes / vector |
-//! |------|---------------------|
-//! | `Int8` | dim + 4 ≈ 1 540 B |
-//! | `Float32` | dim × 4 = 6 144 B |
+//! | Mode | Extra bytes / vector | Accuracy vs exact f32 dot |
+//! |------|---------------------|---------------------------|
+//! | `Int8` | dim + 4 ≈ 1 540 B | cos-sim typically > 0.999 |
+//! | `Float16` | dim × 2 = 3 072 B | cos-sim typically > 0.99999 |
+//! | `Float32` | dim × 4 = 6 144 B | exact |
 //!
 //! Compare to the base 4-bit index cost of dim × 4 / 8 = 192 B/vector.
+//!
+//! `Float16` (IEEE half precision) is the sweet spot for embeddings: it is
+//! half the size of `Float32` yet ~5 decimal digits more faithful than
+//! `Int8`, because embedding coordinates are small and unit-scaled so the
+//! 10-bit half-precision mantissa loses almost nothing.
 
-use rayon::prelude::*;
+use crate::par::prelude::*;
+use half::f16;
 
-/// Whether to store original vectors as int8 (with a per-vector scale) or
-/// as full float32.
+/// Whether to store original vectors as int8 (with a per-vector scale),
+/// as IEEE half precision (`f16`), or as full float32.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RefineMode {
     /// Store as int8 codes with a per-vector symmetric scale `max_abs / 127`.
     /// Approximately 4× cheaper to store than `Float32` at d=1536.
     /// Cosine similarity of re-ranked scores vs f32 is typically > 0.999.
     Int8,
+    /// Store as IEEE 754 half precision (`f16`).  Half the size of `Float32`
+    /// with near-exact re-ranked scores (cos-sim vs f32 typically > 0.99999).
+    Float16,
     /// Store as full float32.  Re-ranked scores are exact inner products.
     Float32,
 }
@@ -51,6 +61,8 @@ pub struct RefineStore {
     pub codes_i8: Vec<i8>,
     /// `Int8` path: per-vector symmetric scale = `max_abs / 127`, length `n`.
     pub i8_scales: Vec<f32>,
+    /// `Float16` path: raw stored vectors as `f16`, length `n * dim`.
+    pub halfs: Vec<f16>,
     /// `Float32` path: raw stored vectors, length `n * dim`.
     pub floats: Vec<f32>,
 }
@@ -61,6 +73,7 @@ impl RefineStore {
             mode,
             codes_i8: Vec::new(),
             i8_scales: Vec::new(),
+            halfs: Vec::new(),
             floats: Vec::new(),
         }
     }
@@ -70,6 +83,10 @@ impl RefineStore {
         match self.mode {
             RefineMode::Float32 => {
                 self.floats.extend_from_slice(&vectors[..n * dim]);
+            }
+            RefineMode::Float16 => {
+                self.halfs
+                    .extend(vectors[..n * dim].iter().map(|&x| f16::from_f32(x)));
             }
             RefineMode::Int8 => {
                 // Parallel quantization: each vector gets its own scale.
@@ -113,6 +130,14 @@ impl RefineStore {
                 }
                 self.floats.truncate(last * dim);
             }
+            RefineMode::Float16 => {
+                if idx != last {
+                    let src = last * dim;
+                    let dst = idx * dim;
+                    self.halfs.copy_within(src..src + dim, dst);
+                }
+                self.halfs.truncate(last * dim);
+            }
             RefineMode::Int8 => {
                 if idx != last {
                     let src = last * dim;
@@ -139,6 +164,15 @@ impl RefineStore {
                 let stored = &self.floats[offset..offset + dim];
                 query.iter().zip(stored.iter()).map(|(&q, &v)| q * v).sum()
             }
+            RefineMode::Float16 => {
+                let offset = idx * dim;
+                let stored = &self.halfs[offset..offset + dim];
+                query
+                    .iter()
+                    .zip(stored.iter())
+                    .map(|(&q, &v)| q * v.to_f32())
+                    .sum()
+            }
             RefineMode::Int8 => {
                 let offset = idx * dim;
                 let codes = &self.codes_i8[offset..offset + dim];
@@ -160,6 +194,7 @@ impl RefineStore {
                 // Caller guarantees dim > 0 when len > 0.
                 self.floats.len() // will be n * dim; outer code tracks n separately
             }
+            RefineMode::Float16 => self.halfs.len(), // n * dim; outer code tracks n
             RefineMode::Int8 => self.i8_scales.len(),
         }
     }

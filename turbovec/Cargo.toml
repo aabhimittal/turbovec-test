@@ -11,10 +11,19 @@ readme = "../README.md"
 keywords = ["vector-search", "quantization", "nearest-neighbor", "ann", "simd"]
 categories = ["algorithms", "science", "compression"]
 
+[features]
+# `parallel` links Rayon for multi-threaded encode/search (on by default).
+# Disable it (`--no-default-features`) for threadless targets such as
+# `wasm32-unknown-unknown`; the crate then falls back to sequential
+# iterators via `src/par.rs` with bit-identical results.
+default = ["parallel"]
+parallel = ["dep:rayon"]
+
 [dependencies]
 ndarray = "0.17"
-rayon = "1.10"
+rayon = { version = "1.10", optional = true }
 ordered-float = "4"
+half = "2"
 rand = "0.8"
 rand_chacha = "0.3"
 rand_distr = "0.4"
