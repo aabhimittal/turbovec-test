@@ -11,6 +11,25 @@ appears under each surface it touches.
 
 ## [Unreleased]
 
+### Added (fork enhancements)
+
+- **`RefineMode::Float16` — half-precision refine store.** A third cascade
+  re-rank storage mode alongside `Int8` and `Float32`: `n·dim` IEEE half
+  values (2 bytes each), half the size of `Float32` yet near-exact for
+  unit-scaled embeddings (cos-sim > 0.99999). Exposed in Python as
+  `refine="float16"`. On-disk v4 refine trailer gains mode byte `3`.
+- **`parallel` cargo feature (default on).** Rayon is now optional; the core
+  reaches it only through `crate::par::prelude`. Building with
+  `--no-default-features` swaps in sequential shims (`src/par.rs`) with
+  bit-identical results, enabling threadless targets.
+- **`turbovec-wasm` crate.** WebAssembly bindings (wasm-bindgen) that compile
+  the real core to `wasm32-unknown-unknown` for fully client-side use.
+- **In-browser demo (`site/`) + GitHub Pages workflow.** A live playground
+  that builds an index and searches using the compiled WASM engine, plus the
+  benchmark charts. Deployed by `.github/workflows/deploy-pages.yml`.
+- **Hugging Face Space (`hf-space/`).** Docker + Gradio app for interactively
+  exploring the bit-width / refine-mode / rerank-factor trade-off.
+
 ## turbovec 0.7.1 (Python package) + turbovec 0.8.1 (Rust crate) — 2026-06-09
 
 Bug-fix release. Two data-safety fixes in the Python integration wrappers'

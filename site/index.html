@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>turbovec — in-browser vector quantization</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%A7%AD%3C/text%3E%3C/svg%3E">
+
+<meta name="description" content="Compress and search embedding vectors at 8–16× with near-perfect recall. The real Rust engine, compiled to WebAssembly, running live in your browser." />
+<style>
+  :root{
+    --bg:#0b0fial;--bg:#0b0f17;--panel:#121826;--panel2:#0e1420;--line:#26324a;
+    --ink:#e6edf7;--mut:#93a1b8;--acc:#5b9dff;--acc2:#7c5cff;--ok:#37d39b;--warn:#ffb454;--bad:#ff6b6b;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  :root[data-theme="light"]{
+    --bg:#f6f8fc;--panel:#ffffff;--panel2:#eef2f9;--line:#dbe3f0;
+    --ink:#0d1526;--mut:#54637d;--acc:#2563eb;--acc2:#6d3cff;--ok:#0c9e6e;--warn:#b8710b;--bad:#d64545;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.55;-webkit-font-smoothing:antialiased}
+  a{color:var(--acc);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 20px}
+  code,kbd{font-family:var(--mono);font-size:.9em}
+  h1,h2,h3{line-height:1.2;font-weight:700}
+  h2{font-size:1.5rem;margin:2.4rem 0 .4rem;letter-spacing:-.01em}
+  h2 .num{color:var(--acc);font-variant-numeric:tabular-nums;margin-right:.5rem}
+  .sub{color:var(--mut);margin:.2rem 0 1.2rem}
+  header.hero{border-bottom:1px solid var(--line);background:
+    radial-gradient(1200px 400px at 15% -10%, rgba(91,157,255,.14), transparent 60%),
+    radial-gradient(900px 380px at 95% -20%, rgba(124,92,255,.13), transparent 60%);}
+  .hero-in{padding:64px 0 48px}
+  .badge{display:inline-flex;gap:8px;align-items:center;font-size:.78rem;color:var(--mut);
+    border:1px solid var(--line);border-radius:999px;padding:5px 12px;background:var(--panel)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  h1.title{font-size:clamp(2.1rem,5vw,3.3rem);margin:18px 0 8px;letter-spacing:-.03em}
+  .title .g{background:linear-gradient(92deg,var(--acc),var(--acc2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .lede{font-size:1.16rem;color:var(--mut);max-width:640px}
+  .cta{display:flex;flex-wrap:wrap;gap:12px;margin-top:24px}
+  .btn{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:10px;
+    padding:10px 16px;font-weight:600;cursor:pointer;font-size:.95rem;transition:.15s}
+  .btn:hover{border-color:var(--acc);text-decoration:none}
+  .btn.primary{background:linear-gradient(92deg,var(--acc),var(--acc2));border:none;color:#fff}
+  .btn.primary:hover{filter:brightness(1.08)}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:34px}
+  .stat{border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:var(--panel)}
+  .stat .k{font-size:1.55rem;font-weight:750;font-variant-numeric:tabular-nums}
+  .stat .l{font-size:.8rem;color:var(--mut)}
+  section{padding:8px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .card{border:1px solid var(--line);border-radius:14px;background:var(--panel);padding:18px 20px}
+  .card h3{margin:.1rem 0 .35rem;font-size:1.06rem}
+  .card p{margin:.2rem 0;color:var(--mut);font-size:.95rem}
+  .pill{font-family:var(--mono);font-size:.72rem;color:var(--acc);border:1px solid var(--line);
+    border-radius:6px;padding:2px 7px;background:var(--panel2)}
+  /* playground */
+  .pg{border:1px solid var(--line);border-radius:16px;background:
+     linear-gradient(180deg,var(--panel),var(--panel2));overflow:hidden}
+  .pg-head{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--line)}
+  .pg-head .dotwrap{display:flex;gap:6px}
+  .pg-head .cdot{width:11px;height:11px;border-radius:50%}
+  .pg-body{padding:18px}
+  .controls{display:grid;grid-template-columns:repeat(3,1fr);gap:14px 18px}
+  .ctl{display:flex;flex-direction:column;gap:5px}
+  .ctl label{font-size:.78rem;color:var(--mut);font-weight:600;display:flex;justify-content:space-between}
+  .ctl label .v{color:var(--acc);font-variant-numeric:tabular-nums}
+  select,input[type=range]{width:100%}
+  select{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:7px 9px;font-size:.9rem}
+  input[type=range]{accent-color:var(--acc)}
+  .run-row{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px;align-items:center}
+  .log{font-family:var(--mono);font-size:.82rem;color:var(--mut);background:var(--panel2);
+    border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-top:14px;min-height:44px;white-space:pre-wrap}
+  .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:16px}
+  .metric{border:1px solid var(--line);border-radius:11px;padding:12px 14px;background:var(--panel)}
+  .metric .k{font-size:1.32rem;font-weight:750;font-variant-numeric:tabular-nums}
+  .metric .l{font-size:.74rem;color:var(--mut)}
+  .metric .s{font-size:.72rem;color:var(--ok)}
+  .bars{margin-top:16px;border:1px solid var(--line);border-radius:11px;padding:14px 16px;background:var(--panel)}
+  .bar-row{display:grid;grid-template-columns:130px 1fr 88px;align-items:center;gap:10px;margin:7px 0;font-size:.82rem}
+  .bar-track{height:16px;background:var(--panel2);border-radius:6px;overflow:hidden;border:1px solid var(--line)}
+  .bar-fill{height:100%;border-radius:6px 0 0 6px;transition:width .4s ease}
+  .results{margin-top:16px;border:1px solid var(--line);border-radius:11px;overflow:hidden}
+  table{width:100%;border-collapse:collapse;font-size:.86rem}
+  th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line)}
+  th{color:var(--mut);font-weight:600;font-size:.76rem;text-transform:uppercase;letter-spacing:.04em;background:var(--panel2)}
+  td.num{font-variant-numeric:tabular-nums;font-family:var(--mono)}
+  .hit{color:var(--ok);font-weight:700}
+  .miss{color:var(--mut)}
+  .charts{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:10px}
+  .charts figure{margin:0;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--panel)}
+  .charts img{width:100%;display:block;background:#fff}
+  .charts figcaption{font-size:.82rem;color:var(--mut);padding:9px 12px}
+  footer{border-top:1px solid var(--line);margin-top:48px;padding:28px 0;color:var(--mut);font-size:.88rem}
+  .toggle{position:fixed;top:14px;right:16px;z-index:9;border:1px solid var(--line);background:var(--panel);
+    color:var(--ink);border-radius:8px;padding:7px 10px;cursor:pointer;font-size:.85rem}
+  .note{font-size:.82rem;color:var(--mut);border-left:2px solid var(--acc);padding-left:12px;margin:12px 0}
+  @media(max-width:820px){.grid2,.charts,.controls{grid-template-columns:1fr}.stats,.metrics{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<button class="toggle" id="themeToggle" aria-label="Toggle theme">◐ theme</button>
+
+<header class="hero">
+  <div class="wrap hero-in">
+    <span class="badge"><span class="dot"></span> Real Rust engine · compiled to WebAssembly · runs 100% client-side</span>
+    <h1 class="title">turbovec <span class="g">in your browser</span></h1>
+    <p class="lede">A data-oblivious 2–4-bit vector quantizer + SIMD approximate-nearest-neighbour engine for embeddings.
+      Compress RAG / semantic-search vectors <strong>8–16×</strong> and keep near-perfect recall. Everything below runs
+      the actual compiled Rust — no server, no API calls.</p>
+    <div class="cta">
+      <a class="btn primary" href="#playground">Try the live demo ↓</a>
+      <a class="btn" href="https://github.com/aabhimittal/turbovec-test" target="_blank" rel="noopener">GitHub repo</a>
+      <a class="btn" href="https://github.com/aabhimittal/turbovec-test/blob/main/docs/SETUP.md" target="_blank" rel="noopener">Setup guide</a>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="k">8×</div><div class="l">compression (4-bit vs float32)</div></div>
+      <div class="stat"><div class="k">0.98</div><div class="l">Recall@1 with cascade re-rank</div></div>
+      <div class="stat"><div class="k">O(batch)</div><div class="l">incremental add cost</div></div>
+      <div class="stat"><div class="k">3 modes</div><div class="l">int8 · <span style="color:var(--acc2)">fp16</span> · float32 refine</div></div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- WHAT'S NEW -->
+  <section>
+    <h2><span class="num">01</span>What this fork adds</h2>
+    <p class="sub">Four enhancements on top of upstream turbovec, all live in the demo below.</p>
+    <div class="grid2">
+      <div class="card">
+        <span class="pill">NEW · fp16 refine</span>
+        <h3>Half-precision refine store</h3>
+        <p>A new <code>RefineMode::Float16</code> keeps the exact re-rank vectors at half the size of float32,
+           yet ~5 decimal digits more faithful than int8. The sweet spot for unit-scaled embeddings.</p>
+      </div>
+      <div class="card">
+        <span class="pill">distillation</span>
+        <h3>Cascade re-ranking</h3>
+        <p>A fast coarse 2–4-bit scan shortlists <code>k×factor</code> candidates, then the stored
+           originals re-score them exactly. Recall@1 climbs from ~0.78 to ~0.98.</p>
+      </div>
+      <div class="card">
+        <span class="pill">PagedAttention-inspired</span>
+        <h3>Incremental blocked packing</h3>
+        <p>Adds only re-pack the tail 32-vector blocks instead of the whole index — O(batch), not O(n),
+           and byte-identical to a full rebuild so recall is unchanged.</p>
+      </div>
+      <div class="card">
+        <span class="pill">NEW · WASM</span>
+        <h3>WebAssembly bindings</h3>
+        <p>The core compiles to <code>wasm32</code> with a sequential fallback (no threads), so the whole
+           engine runs in the browser. That's what powers this page.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- PLAYGROUND -->
+  <section id="playground">
+    <h2><span class="num">02</span>Live playground</h2>
+    <p class="sub">Generate a clustered vector corpus in-browser, build a real turbovec index, and search it.
+      Ground-truth recall is computed by brute force in JS for comparison.</p>
+
+    <div class="pg">
+      <div class="pg-head">
+        <span class="dotwrap"><span class="cdot" style="background:#ff5f57"></span><span class="cdot" style="background:#febc2e"></span><span class="cdot" style="background:#28c840"></span></span>
+        <strong style="font-size:.9rem">turbovec.wasm</strong>
+        <span id="wasmStatus" class="pill" style="margin-left:auto">loading engine…</span>
+      </div>
+      <div class="pg-body">
+        <div class="controls">
+          <div class="ctl"><label>Dimensions <span class="v" id="dimV">256</span></label>
+            <select id="dim"><option>128</option><option selected>256</option><option>512</option></select></div>
+          <div class="ctl"><label>Vectors <span class="v" id="nV">5,000</span></label>
+            <input type="range" id="n" min="500" max="20000" step="500" value="5000"></div>
+          <div class="ctl"><label>Topic clusters <span class="v" id="clV">40</span></label>
+            <input type="range" id="cl" min="4" max="120" step="4" value="40"></div>
+          <div class="ctl"><label>Bit width <span class="v" id="bwV">4</span></label>
+            <select id="bw"><option>2</option><option>3</option><option selected>4</option></select></div>
+          <div class="ctl"><label>Refine mode</label>
+            <select id="refine"><option value="none">none (coarse only)</option><option value="int8">int8</option>
+              <option value="float16" selected>float16 (new)</option><option value="float32">float32 (exact)</option></select></div>
+          <div class="ctl"><label>Rerank factor <span class="v" id="rfV">4</span></label>
+            <select id="rf"><option>1</option><option>2</option><option selected>4</option><option>8</option></select></div>
+        </div>
+        <div class="run-row">
+          <button class="btn primary" id="buildBtn" disabled>Build index</button>
+          <button class="btn" id="queryBtn" disabled>Run 50 random queries</button>
+          <span class="ctl" style="flex-direction:row;align-items:center;gap:8px">
+            <label style="margin:0">k</label>
+            <select id="k" style="width:auto"><option>1</option><option selected>10</option><option>20</option></select>
+          </span>
+        </div>
+        <div class="log" id="log">Waiting for the WebAssembly module…</div>
+
+        <div class="metrics" id="metrics" style="display:none">
+          <div class="metric"><div class="k" id="mComp">—</div><div class="l">compression vs float32</div><div class="s" id="mCompS"></div></div>
+          <div class="metric"><div class="k" id="mRecall">—</div><div class="l" id="mRecallL">Recall@10</div><div class="s" id="mRecallS"></div></div>
+          <div class="metric"><div class="k" id="mBuild">—</div><div class="l">build time</div><div class="s" id="mBuildS"></div></div>
+          <div class="metric"><div class="k" id="mQuery">—</div><div class="l">avg query time</div><div class="s" id="mQueryS"></div></div>
+        </div>
+
+        <div class="bars" id="bars" style="display:none">
+          <div style="font-size:.82rem;color:var(--mut);margin-bottom:8px">Memory footprint</div>
+          <div class="bar-row"><span>float32 (raw)</span><div class="bar-track"><div class="bar-fill" id="barF32" style="background:var(--bad)"></div></div><span class="num" id="valF32">—</span></div>
+          <div class="bar-row"><span>turbovec index</span><div class="bar-track"><div class="bar-fill" id="barIdx" style="background:var(--acc)"></div></div><span class="num" id="valIdx">—</span></div>
+          <div class="bar-row"><span id="refLabel">+ refine store</span><div class="bar-track"><div class="bar-fill" id="barRef" style="background:var(--acc2)"></div></div><span class="num" id="valRef">—</span></div>
+        </div>
+
+        <div class="results" id="resultsWrap" style="display:none">
+          <table>
+            <thead><tr><th>#</th><th>slot</th><th>cluster</th><th>score</th><th>ground truth</th></tr></thead>
+            <tbody id="resultsBody"></tbody>
+          </table>
+        </div>
+        <p class="note">Everything here — quantization, packing, LUT scoring, cascade re-rank — executes inside the
+          compiled <code>turbovec.wasm</code>. The page only generates the random corpus and computes brute-force
+          ground truth to score recall.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- BENCHMARKS -->
+  <section>
+    <h2><span class="num">03</span>Measured benchmarks</h2>
+    <p class="sub">From a 100 000-vector, dim-1536 corpus (mimicking OpenAI embeddings). Reproduce with
+      <code>python3 demo/run_demo.py --charts</code>.</p>
+    <div class="charts">
+      <figure><img src="charts/memory_comparison.png" alt="Memory comparison" loading="lazy"><figcaption>8× smaller at 4-bit; the int8 refine store trades memory for exact re-rank.</figcaption></figure>
+      <figure><img src="charts/recall_at_k.png" alt="Recall at k" loading="lazy"><figcaption>Cascade re-ranking lifts Recall@1 from 0.78 to 0.98 (+20pp).</figcaption></figure>
+      <figure><img src="charts/rerank_improvement.png" alt="Rerank improvement" loading="lazy"><figcaption>Recall@1 climbs with rerank factor, saturating near 1.0.</figcaption></figure>
+      <figure><img src="charts/incremental_add.png" alt="Incremental add" loading="lazy"><figcaption>Add time stays flat (~400ms) as the index grows — O(batch), not O(n).</figcaption></figure>
+      <figure><img src="charts/scale_projection.png" alt="Scale projection" loading="lazy"><figcaption>Memory at scale, 100K → 1B vectors (log scale).</figcaption></figure>
+      <figure><img src="charts/bitwidth_tradeoff.png" alt="Bit-width tradeoff" loading="lazy"><figcaption>The memory/recall Pareto frontier across configurations.</figcaption></figure>
+    </div>
+  </section>
+
+  <!-- HOW -->
+  <section>
+    <h2><span class="num">04</span>How it works</h2>
+    <div class="grid2">
+      <div class="card"><h3>Quantize</h3><p>Each vector is normalized, rotated by a seeded random orthogonal
+        matrix (which forces a data-oblivious Beta distribution), calibrated per-coordinate (TQ+), then
+        quantized to 2–4 bits with a Lloyd-Max optimal codebook and packed into a SIMD-friendly bit-plane layout.</p></div>
+      <div class="card"><h3>Search</h3><p>The query is rotated the same way; per-query lookup tables turn the
+        dot product into byte additions the SIMD kernel (AVX2 / AVX-512 / NEON, scalar on wasm) accumulates
+        across 32-vector blocks, feeding a top-k heap.</p></div>
+      <div class="card"><h3>Re-rank</h3><p>The coarse scan returns a shortlist; the opt-in refine store
+        (int8 / <span style="color:var(--acc2)">fp16</span> / float32) re-scores those exactly and returns the
+        true top-k. This is the two-stage distillation pattern from LLM retrieval.</p></div>
+      <div class="card"><h3>Grow</h3><p>Adding vectors only re-packs the tail blocks and appends to the refine
+        store, so incremental indexing stays cheap even at scale.</p></div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    Built with the real turbovec Rust core compiled to WebAssembly ·
+    <a href="https://github.com/aabhimittal/turbovec-test" target="_blank" rel="noopener">source</a> ·
+    <a href="https://github.com/aabhimittal/turbovec-test/blob/main/docs/ARCHITECTURE.md" target="_blank" rel="noopener">architecture</a> ·
+    <a href="https://github.com/aabhimittal/turbovec-test/blob/main/docs/SETUP.md" target="_blank" rel="noopener">run it locally</a>
+  </div>
+</footer>
+
+<script type="module" src="./app.js"></script>
+<script>
+  // Theme toggle (independent of the module so it works even if wasm fails).
+  const root=document.documentElement, tt=document.getElementById('themeToggle');
+  tt.addEventListener('click',()=>{root.dataset.theme=root.dataset.theme==='dark'?'light':'dark';});
+</script>
+</body>
+</html>

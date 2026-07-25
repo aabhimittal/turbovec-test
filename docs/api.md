@@ -40,9 +40,25 @@ Before the first add, `idx.dim` is `None`, `len(idx)` is `0`, and `search()` ret
 
 | Method | Notes |
 |---|---|
-| `TurboQuantIndex(dim=None, bit_width=4)` | `bit_width ∈ {2, 3, 4}`. `dim` is optional; when omitted it is inferred from the first `add` call. |
+| `TurboQuantIndex(dim=None, bit_width=4, refine=None)` | `bit_width ∈ {2, 3, 4}`. `dim` is optional; when omitted it is inferred from the first `add` call. `refine ∈ {None, "int8", "float16", "float32"}` enables an opt-in store of the original vectors for exact cascade re-ranking (choose before the first `add`). |
 | `add(vectors)` | `vectors` is a contiguous float32 array of shape `(n, dim)`. On a lazy index the first call locks `dim`; subsequent calls must match. Raises `ValueError` on dim mismatch. |
-| `search(queries, k, *, mask=None)` | Returns `(scores, indices)`, both shape `(nq, effective_k)`. Indices are `int64` slot positions. `mask` is an optional `bool` array of length `len(idx)`; when given, only slots with `mask[i] == True` contribute. `effective_k = min(k, mask.sum())`. |
+| `search(queries, k, *, mask=None, rerank_factor=None)` | Returns `(scores, indices)`, both shape `(nq, effective_k)`. Indices are `int64` slot positions. `mask` is an optional `bool` array of length `len(idx)`; when given, only slots with `mask[i] == True` contribute. `effective_k = min(k, mask.sum())`. `rerank_factor` (requires a `refine=` store): coarse-scan `k × rerank_factor` candidates, then re-score them with the stored originals and return the exact top-k. |
+
+### Refine modes (cascade re-ranking)
+
+`refine=` trades memory for exact-inner-product accuracy on the re-ranked shortlist:
+
+| Mode | Extra bytes / vector | Accuracy vs exact f32 dot |
+|---|---|---|
+| `"int8"` | `dim + 4` | cos-sim > 0.9999 |
+| `"float16"` | `dim × 2` | cos-sim > 0.99999 |
+| `"float32"` | `dim × 4` | exact |
+
+```python
+idx = TurboQuantIndex(1536, bit_width=4, refine="float16")
+idx.add(vectors)
+scores, indices = idx.search(queries, k=10, rerank_factor=4)  # scan 40, return best 10
+```
 | `swap_remove(idx)` | O(1). Moves the last vector into `idx`; returns the previous position of that moved vector (so external refs can be updated if needed). |
 | `prepare()` | Optional. Eagerly builds the rotation matrix, Lloyd-Max centroids and SIMD-blocked layout so the first `search` call doesn't pay the one-time cost. No-op on a lazy index that hasn't seen its first add. |
 | `write(path)` / `load(path)` | `.tv` format. |

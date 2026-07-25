@@ -1,0 +1,6 @@
+# Runtime deps for local runs (the Space itself installs these via the Dockerfile).
+# turbovec is built from source — see the Dockerfile, or install locally with:
+#   cd ../turbovec-python && maturin develop --release
+gradio>=4.0
+numpy>=1.20
+matplotlib>=3.6
