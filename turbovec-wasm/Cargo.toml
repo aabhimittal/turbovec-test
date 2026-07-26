@@ -1,0 +1,23 @@
+[package]
+name = "turbovec-wasm"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "WebAssembly bindings for the turbovec quantized ANN engine — powers the in-browser demo on GitHub Pages."
+license = "MIT"
+
+[lib]
+# cdylib → the `.wasm` artifact; rlib → lets the native workspace build it too.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# default-features = false turns OFF the `parallel` (Rayon) feature: the
+# wasm32-unknown-unknown target has no threads, so the core falls back to the
+# sequential iterators in turbovec/src/par.rs (bit-identical results).
+turbovec = { path = "../turbovec", default-features = false }
+wasm-bindgen = "0.2"
+
+# The `rand` crate (a transitive dep) reaches for getrandom; on wasm it needs
+# the JS backend. Gate it to wasm only so native builds don't pull js-sys.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

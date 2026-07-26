@@ -12,9 +12,11 @@ fn parse_refine_mode(s: Option<&str>) -> PyResult<Option<turbovec_core::RefineMo
     match s {
         None => Ok(None),
         Some("int8")    => Ok(Some(turbovec_core::RefineMode::Int8)),
+        Some("float16") | Some("fp16") | Some("half")
+                        => Ok(Some(turbovec_core::RefineMode::Float16)),
         Some("float32") => Ok(Some(turbovec_core::RefineMode::Float32)),
         Some(other) => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "refine must be None, \"int8\", or \"float32\"; got {:?}", other
+            "refine must be None, \"int8\", \"float16\", or \"float32\"; got {:?}", other
         ))),
     }
 }

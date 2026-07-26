@@ -42,6 +42,7 @@ pub mod error;
 pub mod id_map;
 pub mod io;
 pub mod pack;
+pub(crate) mod par;
 pub mod refine;
 pub mod rotation;
 pub mod search;
@@ -606,7 +607,7 @@ impl TurboQuantIndex {
         let effective_k = k.min(coarse.k); // coarse.k already ≤ n_allowed
 
         // Re-score each query's candidates in parallel.
-        use rayon::prelude::*;
+        use crate::par::prelude::*;
         let query_stride = dim;
         let (reranked_scores, reranked_indices): (Vec<f32>, Vec<i64>) = (0..nq)
             .into_par_iter()
@@ -815,6 +816,11 @@ impl TurboQuantIndex {
                         rs.floats.len(), expected_floats,
                         "from_parts: refine floats.len()={} != n_vectors({}) * dim({})",
                         rs.floats.len(), n_vectors, d,
+                    ),
+                    refine::RefineMode::Float16 => assert_eq!(
+                        rs.halfs.len(), expected_floats,
+                        "from_parts: refine halfs.len()={} != n_vectors({}) * dim({})",
+                        rs.halfs.len(), n_vectors, d,
                     ),
                     refine::RefineMode::Int8 => {
                         assert_eq!(

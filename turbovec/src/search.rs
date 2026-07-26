@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rayon::prelude::*;
+use crate::par::prelude::*;
 use crate::{BLOCK, FLUSH_EVERY};
 
 /// Cumulative count of 32-vector blocks short-circuited by the mask

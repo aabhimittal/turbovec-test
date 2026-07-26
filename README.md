@@ -32,6 +32,15 @@ Building RAG where privacy, memory, or latency matters? **You're in the right pl
 
 **[Full setup guide →](docs/SETUP.md)** — local, Docker, Claude Code on the web, Pinecone/Qdrant real-data swap-in.
 
+### 🚀 Live demos
+
+| Demo | What it is | Link |
+|---|---|---|
+| **In-browser playground** | The **real** turbovec Rust core compiled to **WebAssembly** — builds an index and searches entirely client-side, no server. | [`aabhimittal.github.io/turbovec-test`](https://aabhimittal.github.io/turbovec-test/) |
+| **Hugging Face Space** | Interactive Gradio app: tune bit-width / refine mode / rerank factor and watch Recall@1 vs memory update live. | [`hf-space/`](hf-space/) — one-command deploy |
+
+> The Pages demo goes live once the repo's **Settings → Pages → Source** is set to *GitHub Actions* (the `deploy-pages.yml` workflow does the rest). The HF Space builds turbovec from source via its `Dockerfile` — see [`hf-space/README.md`](hf-space/README.md).
+
 Run the demo yourself:
 ```bash
 # Quick smoke-test (uses 500-vector sample committed to repo — no generation needed)
@@ -164,14 +173,17 @@ Query
 
 > **Glossary — inner product (dot product):** The similarity score between two vectors: `score = v₁[0]×v₂[0] + v₁[1]×v₂[1] + … + v₁[d]×v₂[d]`. For unit-length (normalised) vectors this is equivalent to cosine similarity — 1.0 = identical direction, 0.0 = perpendicular. Vector search finds the stored vector with the highest dot product against the query.
 
-#### Two storage modes for the refinement store
+#### Three storage modes for the refinement store
 
 | Mode | Extra memory (d=1536) | Score accuracy |
 |---|---|---|
 | `refine="float32"` | +585.9 MB (full precision) | Exact inner product |
+| `refine="float16"` | +293.0 MB (2× cheaper) | ≈ exact (cos-sim > 0.99999 vs float32) — **new in this fork** |
 | `refine="int8"` | +146.9 MB (4× cheaper) | ≈ exact (cos-sim > 0.9999 vs float32) |
 
 > **Glossary — INT8 quantization:** Storing a 32-bit float (4 bytes) as an 8-bit integer (1 byte) by computing `scale = max(|x|) / 127`, then `code = round(x / scale)`. Reconstruction: `x̂ = code × scale`. Error per element ≤ `scale / 2`. Memory: 4× cheaper than float32 at a tiny accuracy cost.
+>
+> **Glossary — FP16 (half precision):** IEEE 754 stores each number in 16 bits (1 sign, 5 exponent, 10 mantissa) instead of float32's 32 bits. For unit-scaled embedding coordinates (all small, similar magnitude) the 10-bit mantissa keeps ~3–4 decimal digits — so the re-ranked score is near-exact (cos-sim > 0.99999) at **half** the memory of float32 and no per-vector scale bookkeeping. It's the middle ground between int8 (smallest) and float32 (exact).
 
 #### Python API
 
@@ -306,15 +318,17 @@ Attention output cosine similarity (fp32 KV vs int8 KV):
 | Path | Purpose |
 |---|---|
 | `demo/run_demo.py` | **End-to-end demo** on 100K synthetic corpus — runs all sections above |
-| `turbovec/src/refine.rs` | `RefineStore` — Int8/Float32 original-vector store for re-ranking |
-| `turbovec/tests/incremental_pack.rs` | 8 byte-identity tests for tail-only repack |
-| `turbovec/tests/rerank.rs` | 11 correctness + round-trip tests for cascade re-rank |
-| `turbovec-python/src/lib.rs` | Python bindings: `refine=` param, `rerank_factor=` in `search()` |
+| `turbovec/src/refine.rs` | `RefineStore` — Int8 / **Float16** / Float32 original-vector store for re-ranking |
+| `turbovec/src/par.rs` | Parallelism abstraction — Rayon on native, sequential shims for wasm (`--no-default-features`) |
+| `turbovec-wasm/` | **WebAssembly bindings** — compiles the core to `wasm32`; powers the in-browser demo |
+| `site/` | **GitHub Pages** site: live WASM playground + benchmark charts |
+| `hf-space/` | **Hugging Face Space** (Docker + Gradio) — interactive search over the sample corpus |
+| `.github/workflows/deploy-pages.yml` | CI that publishes `site/` to GitHub Pages |
+| `turbovec/tests/rerank.rs` | Correctness + round-trip tests for cascade re-rank (incl. fp16) |
+| `turbovec-python/src/lib.rs` | Python bindings: `refine=` param (`int8`/`float16`/`float32`), `rerank_factor=` in `search()` |
 | `examples/paged-llm-demo/` | Rust educational demo crate (KV cache + INT8 quant + MHA decoder) |
 | `docs/ARCHITECTURE.md` | Mermaid module graph, encode/search pipelines, LLM mapping |
-| `CLAUDE.md` | Developer guide: commands, module map, gotchas |
 | `benchmarks/suite/incremental_add.py` | Benchmark: 100× add-then-search wall time |
-| `benchmarks/suite/recall_d1536_4bit_rerank.py` | Benchmark: sweep rerank_factor on 2-bit + 4-bit |
 
 ---
 

@@ -12,8 +12,11 @@ Two crates, one example, benchmark scripts:
 ```
 turbovec/           # Core Rust library (the algorithm)
 turbovec-python/    # PyO3 bindings + LangChain/LlamaIndex/Haystack/Agno integrations
+turbovec-wasm/      # WebAssembly bindings (wasm-bindgen) — powers the browser demo
 examples/           # Runnable demos
 benchmarks/suite/   # Python recall + speed benchmark scripts
+site/               # GitHub Pages: live WASM playground + charts (deploy-pages.yml)
+hf-space/           # Hugging Face Space (Docker + Gradio) interactive demo
 ```
 
 ## Build & test commands
@@ -30,6 +33,15 @@ pytest tests/
 # Example crates
 cargo run -p paged-llm-demo --release      # educational LLM demo
 cd examples/downstream-smoke && cargo run --release  # excluded from workspace
+
+# WebAssembly build (the browser demo). The core must build without Rayon:
+cargo build -p turbovec-wasm --target wasm32-unknown-unknown --release
+wasm-bindgen --target web --no-typescript --out-dir site/pkg \
+  target/wasm32-unknown-unknown/release/turbovec_wasm.wasm
+python3 -m http.server -d site 8000          # serve the playground locally
+
+# Hugging Face Space (needs turbovec wheel + gradio installed locally)
+python3 hf-space/app.py                        # or: docker build -f hf-space/Dockerfile
 
 # Benchmarks (Python scripts, need turbovec-python installed)
 python3 benchmarks/suite/recall_d1536_4bit.py
@@ -49,7 +61,8 @@ python3 benchmarks/suite/incremental_add.py
 | `id_map.rs` | `IdMapIndex`: stable u64-ID wrapper over `TurboQuantIndex` |
 | `io.rs` | `.tv` / `.tvim` file format (v2/v3/v4), read/write with version dispatch |
 | `error.rs` | Typed errors: `AddError`, `ConstructError`, `RerankError` |
-| `refine.rs` | Opt-in refinement store for cascade re-ranking (`RefineMode`, `RefineStore`) |
+| `refine.rs` | Opt-in refinement store for cascade re-ranking (`RefineMode` = Int8/Float16/Float32, `RefineStore`) |
+| `par.rs` | Parallelism abstraction: Rayon prelude when `parallel` feature is on (default), sequential shims when off (wasm) |
 
 ## Gotchas
 
@@ -90,11 +103,22 @@ v2 = no TQ+; v3 = adds TQ+ calibration trailer; v4 = adds optional refine
 store trailer. v4 is only written when a `RefineStore` is present; otherwise
 the file is written as v3 so old readers are unaffected. v1 (no magic) is
 refused with a rebuild hint. Add new version handling in `read_core_versioned`.
+The v4 refine trailer starts with a mode byte: `1`=Int8, `2`=Float32,
+`3`=Float16 (`n·dim` f16 values, 2 bytes each, LE) — keep writer/reader in sync.
 
 **`pack::repack_3bit` is dead code.**
 3-bit search currently goes through the generic 4-bit nibble path. The
 function is defined but has no callers — don't delete it (may be needed for a
 future dedicated 3-bit kernel), but don't be surprised when a linter flags it.
+
+**`parallel` feature gates Rayon; wasm builds with it off.**
+The core reaches Rayon only through `crate::par::prelude` (never `rayon::` directly).
+With `--no-default-features` the prelude swaps in sequential shims in `par.rs`
+(`into_par_iter`/`par_chunks`/`par_chunks_mut`/`par_iter_mut` → std iterators).
+Results are bit-identical because every parallel section is embarrassingly
+parallel (independent per-row / per-query, no cross-item reduction). The
+`turbovec-wasm` crate depends on turbovec with `default-features = false`.
+If you add a new Rayon method, add its shim to `par.rs` or the wasm build breaks.
 
 **`.cargo/config.toml` pins `target-cpu=x86-64-v3`.**
 This enables AVX2 as the baseline on x86. Do not raise to x86-64-v4 (AVX-512

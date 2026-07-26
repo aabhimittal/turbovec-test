@@ -76,6 +76,42 @@ def test_self_query_recall_at_1():
     assert hits == 20, f"recall@1 failed: {hits}/20"
 
 
+@pytest.mark.parametrize("refine", ["int8", "float16", "float32"])
+def test_rerank_refine_modes(refine):
+    # All three refine modes must build, search with a rerank_factor, and
+    # return exact-length results. float16 is the fork's new half-precision mode.
+    vectors = unit_vectors(300, 128, seed=11)
+    idx = TurboQuantIndex(dim=128, bit_width=4, refine=refine)
+    idx.add(vectors)
+    scores, indices = idx.search(vectors[:5], k=10, rerank_factor=4)
+    assert scores.shape == (5, 10)
+    assert indices.shape == (5, 10)
+    # Each query's nearest neighbour under exact re-rank is itself.
+    for i in range(5):
+        assert indices[i, 0] == i, f"{refine}: self-query top-1 was {indices[i,0]}, expected {i}"
+
+
+def test_float16_refine_roundtrip(tmp_path):
+    vectors = unit_vectors(60, 128, seed=13)
+    idx = TurboQuantIndex(dim=128, bit_width=4, refine="float16")
+    idx.add(vectors)
+    path = str(tmp_path / "f16.tv")
+    idx.write(path)
+    # v4 file (byte 4 is the version) because a refine store is present.
+    with open(path, "rb") as f:
+        assert f.read(5)[4] == 4
+    loaded = TurboQuantIndex.load(path)
+    s0, i0 = idx.search(vectors[:3], k=5, rerank_factor=3)
+    s1, i1 = loaded.search(vectors[:3], k=5, rerank_factor=3)
+    assert np.array_equal(i0, i1)
+    assert np.allclose(s0, s1)
+
+
+def test_invalid_refine_mode_raises():
+    with pytest.raises(ValueError):
+        TurboQuantIndex(dim=64, bit_width=4, refine="bfloat16")
+
+
 def test_save_load_roundtrip(tmp_path):
     vectors = unit_vectors(80, 128, seed=7)
     idx = TurboQuantIndex(dim=128, bit_width=4)
